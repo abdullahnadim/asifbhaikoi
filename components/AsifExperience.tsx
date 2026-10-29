@@ -15,14 +15,29 @@ export default function AsifExperience() {
   const success = useRef<HTMLHeadingElement>(null);
   const sequence = useRef(0);
   const lastMove = useRef(0);
+  const pointerRef = useRef<{ point: Point; touch: boolean } | null>(null);
+  const waypoint = useRef<Point | null>(null);
+  const frame = useRef(0);
+  const running = useRef(false);
   const restoreFocus = useRef(false);
   const [positions, setPositions] = useState<[Point, Point]>([{ x: 0, y: 0 }, { x: 0, y: 0 }]);
   const positionRef = useRef(positions);
   const [ready, setReady] = useState(false);
   const [fleeing, setFleeing] = useState(false);
+  const [motionRun, setMotionRun] = useState(0);
   const [result, setResult] = useState<0 | 1 | null>(null);
 
+  const stopMotion = useCallback(() => {
+    cancelAnimationFrame(frame.current);
+    running.current = false;
+    waypoint.current = null;
+    pointerRef.current = null;
+    buttons.current[1]?.style.setProperty('--slip-lean', '0deg');
+    setFleeing(false);
+  }, []);
+
   const resetPositions = useCallback(() => {
+    stopMotion();
     if (!stage.current || !prompt.current) return;
     const bounds = stage.current.getBoundingClientRect();
     const heading = prompt.current.getBoundingClientRect();
@@ -40,7 +55,7 @@ export default function AsifExperience() {
     setFleeing(false);
     setPositions(next);
     setReady(true);
-  }, []);
+  }, [stopMotion]);
 
   useEffect(() => {
     document.title = config.pageTitle;
@@ -56,45 +71,106 @@ export default function AsifExperience() {
     else if (restoreFocus.current && ready) { buttons.current[0]?.focus(); restoreFocus.current = false; }
   }, [result, ready]);
 
-  const evade = useCallback((pointer: Point) => {
-    if (!stage.current || !buttons.current[1] || result !== null) return;
-    if (performance.now() - lastMove.current < 70) return;
+  const nextWaypoint = useCallback((pointer: Point) => {
+    if (!stage.current || !buttons.current[1]) return null;
     const bounds = stage.current.getBoundingClientRect();
     const target = buttons.current[1];
-    const visibleTarget = target.getBoundingClientRect();
     const asRect = (element: HTMLElement): Rect => {
       const rect = element.getBoundingClientRect();
       return { x: rect.left - bounds.left, y: rect.top - bounds.top, width: rect.width, height: rect.height };
     };
     const obstacles = [prompt.current, buttons.current[0], credit.current].flatMap(element => element ? [asRect(element)] : []);
-    const next = chooseEscapePosition({
+    return chooseEscapePosition({
       width: Math.min(bounds.width, window.innerWidth),
       height: Math.min(bounds.height, window.innerHeight),
       buttonWidth: target.offsetWidth,
       buttonHeight: target.offsetHeight,
       pointer: { x: pointer.x - bounds.left, y: pointer.y - bounds.top },
-      current: { x: visibleTarget.left - bounds.left, y: visibleTarget.top - bounds.top },
+      current: positionRef.current[1],
       obstacles,
       sequence: sequence.current++,
     });
+  }, []);
+
+  const evade = useCallback((point: Point, touch = false, force = false) => {
+    if (result !== null || !ready) return;
+    pointerRef.current = { point, touch };
+    if (running.current && !force) return;
+    const next = nextWaypoint(point);
     if (!next) return;
-    const nextPositions: [Point, Point] = [positionRef.current[0], next];
-    positionRef.current = nextPositions;
-    setFleeing(true);
-    setPositions(nextPositions);
     lastMove.current = performance.now();
-  }, [result]);
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      positionRef.current = [positionRef.current[0], next];
+      setPositions(positionRef.current);
+      return;
+    }
+    waypoint.current = next;
+    if (!running.current) setMotionRun(value => value + 1);
+    running.current = true;
+    setFleeing(true);
+  }, [result, ready, nextWaypoint]);
+
+  useEffect(() => {
+    if (!fleeing || !ready || result !== null) return;
+    let previousTime = performance.now();
+    const tick = (now: number) => {
+      if (!running.current || !buttons.current[1]) return;
+      const target = buttons.current[1];
+      const latest = pointerRef.current;
+      const rect = target.getBoundingClientRect();
+      const distance = latest ? Math.hypot(Math.max(rect.left - latest.point.x, latest.point.x - rect.right, 0), Math.max(rect.top - latest.point.y, latest.point.y - rect.bottom, 0)) : Infinity;
+      // Keep reacting even if the cursor pauses nearby; a touch produces one glide.
+      if (latest && !latest.touch && distance < 105 && now - lastMove.current > 80) {
+        const next = nextWaypoint(latest.point);
+        if (next) waypoint.current = next;
+        else if (waypoint.current && Math.hypot(waypoint.current.x - positionRef.current[1].x, waypoint.current.y - positionRef.current[1].y) < .5) {
+          setPositions(positionRef.current);
+          stopMotion();
+          return;
+        }
+        lastMove.current = now;
+      }
+      const goal = waypoint.current;
+      if (!goal) { stopMotion(); return; }
+      const current = positionRef.current[1];
+      const dt = Math.min(.032, Math.max(.001, (now - previousTime) / 1000));
+      previousTime = now;
+      // Exponential glide has no overshoot: every frame stays on a validated path.
+      const blend = 1 - Math.exp(-15 * dt);
+      const next = { x: current.x + (goal.x - current.x) * blend, y: current.y + (goal.y - current.y) * blend };
+      positionRef.current = [positionRef.current[0], next];
+      target.style.left = `${next.x}px`;
+      target.style.top = `${next.y}px`;
+      target.style.setProperty('--slip-lean', `${Math.max(-5, Math.min(5, (next.x - current.x) * .35))}deg`);
+      if (Math.hypot(goal.x - next.x, goal.y - next.y) < .5 && (!latest || latest.touch || distance >= 105 || now - lastMove.current > 100)) {
+        setPositions(positionRef.current);
+        stopMotion();
+        return;
+      }
+      frame.current = requestAnimationFrame(tick);
+    };
+    frame.current = requestAnimationFrame(tick);
+    const onBlur = () => { setPositions(positionRef.current); stopMotion(); };
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onPreference = () => { if (media.matches) onBlur(); };
+    window.addEventListener('blur', onBlur);
+    media.addEventListener('change', onPreference);
+    return () => { cancelAnimationFrame(frame.current); window.removeEventListener('blur', onBlur); media.removeEventListener('change', onPreference); };
+  }, [fleeing, motionRun, ready, result, nextWaypoint, stopMotion]);
 
   useEffect(() => {
     if (result !== null) return;
     const onMove = (event: PointerEvent) => {
       if (event.pointerType === 'touch' || !buttons.current[1]) return;
+      pointerRef.current = { point: { x: event.clientX, y: event.clientY }, touch: false };
       const rect = buttons.current[1].getBoundingClientRect();
       const distance = Math.hypot(Math.max(rect.left - event.clientX, event.clientX - rect.right, 0), Math.max(rect.top - event.clientY, event.clientY - rect.bottom, 0));
-      if (distance < 75) evade({ x: event.clientX, y: event.clientY });
+      if (distance < 105) evade({ x: event.clientX, y: event.clientY });
     };
+    const onLeave = () => { pointerRef.current = null; };
     window.addEventListener('pointermove', onMove);
-    return () => window.removeEventListener('pointermove', onMove);
+    document.addEventListener('pointerleave', onLeave);
+    return () => { window.removeEventListener('pointermove', onMove); document.removeEventListener('pointerleave', onLeave); };
   }, [evade, result]);
 
   return <div className="experience asif-fullscreen" style={{ '--page-bg': config.background, '--accent': config.accent } as CSSProperties}>
@@ -103,13 +179,13 @@ export default function AsifExperience() {
         <h1 className="asif-question" ref={prompt}>{config.question}</h1>
         {config.buttons.map((button, index) => <button key={index}
           ref={element => { buttons.current[index] = element; }}
-          className={`answer-button answer-${index} asif-answer${index === 1 && fleeing ? ' is-fleeing' : ''}`}
+          className={`answer-button answer-${index} asif-answer${index === 1 ? ' asif-slippery' : ''}${index === 1 && fleeing ? ' is-fleeing' : ''}`}
           style={{ left: positions[index].x, top: positions[index].y, visibility: ready ? 'visible' : 'hidden' }}
-          onPointerEnter={event => { if (index === 1) evade({ x: event.clientX, y: event.clientY }); }}
-          onPointerDown={event => { if (index === 1) { event.preventDefault(); evade({ x: event.clientX, y: event.clientY }); } }}
-          onClick={event => { if (index === 1 && event.detail !== 0) { event.preventDefault(); return; } setResult(index as 0 | 1); }}
+          onPointerEnter={event => { if (index === 1 && event.pointerType !== 'touch') evade({ x: event.clientX, y: event.clientY }); }}
+          onPointerDown={event => { if (index === 1) { event.preventDefault(); evade({ x: event.clientX, y: event.clientY }, event.pointerType === 'touch', true); } }}
+          onClick={event => { if (index === 1 && event.detail !== 0) { event.preventDefault(); return; } stopMotion(); setResult(index as 0 | 1); }}
           aria-describedby={index === 1 ? 'asif-keyboard-help' : undefined}>
-          <span>{button.label}</span>{index === 0 ? <ArrowRight size={18}/> : <span aria-hidden="true" className="button-spark">↗</span>}
+          <span className={index === 1 ? 'asif-slip-label' : undefined}>{button.label}</span>{index === 0 ? <ArrowRight size={18}/> : <span aria-hidden="true" className="button-spark asif-slip-label">↗</span>}
         </button>)}
         <span id="asif-keyboard-help" className="sr-only">This button playfully moves across the page. Press Enter or Space to choose it with a keyboard.</span>
       </> : <section className="asif-result" aria-label="Your answer">

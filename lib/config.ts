@@ -98,7 +98,7 @@ const LEGACY_OFFICE_DEFAULT: SiteConfig = {
 export const ASIF_CONFIG: SiteConfig = {
   ...LEGACY_OFFICE_DEFAULT,
   buttons: [
-    { ...LEGACY_OFFICE_DEFAULT.buttons[0], result: "Nais guess chomu is in FAL Canteen" },
+    { ...LEGACY_OFFICE_DEFAULT.buttons[0], result: "Nice guess! Chomu is in FAL Canteen…\nJhimaitese…" },
     { ...LEGACY_OFFICE_DEFAULT.buttons[1] },
   ],
   pageTitle: "Asif bhai ekhon kothay? — Made by Mir",
